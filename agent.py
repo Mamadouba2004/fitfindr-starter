@@ -18,7 +18,79 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+
+# ── query parsing ────────────────────────────────────────────────────────────
+
+_SIZE_TOKENS = [
+    "xxs", "xs", "s/m", "m/l", "s", "m", "l", "xl", "xxl",
+    "one size",
+]
+
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract description, size, and max_price from a natural language query
+    using simple rule-based parsing (regex + keyword matching) — deterministic
+    and fast, since the LLM is reserved for the two generative tools.
+
+    Returns a dict: {"description": str, "size": str | None, "max_price": float | None}
+    """
+    lower = query.lower()
+
+    # max_price: look for "under $<number>", "$<number>", or "under <number>".
+    # Match the whole phrase (including "under"/"$") so it can be cleanly
+    # removed from the description below.
+    max_price = None
+    price_phrase = re.search(r"under\s+\$?\s*(\d+(?:\.\d+)?)|\$\s*(\d+(?:\.\d+)?)", lower)
+    if price_phrase:
+        price_str = price_phrase.group(1) or price_phrase.group(2)
+        max_price = float(price_str)
+
+    # size: look for "size <token>" first, then a standalone size token
+    size = None
+    size_phrase = re.search(r"size\s+([a-z0-9/]+)", lower)
+    if size_phrase:
+        size = size_phrase.group(1).upper()
+    else:
+        for token in _SIZE_TOKENS:
+            if re.search(rf"\b{re.escape(token)}\b", lower):
+                size = token.upper()
+                break
+
+    # description: cut off at clauses describing the user's existing wardrobe
+    # (those belong to suggest_outfit's context, not the search itself), then
+    # strip out the price/size phrases and remaining filler words.
+    description = lower
+    cutoffs = [
+        r"\bi (?:mostly|usually|typically|often) wear\b.*$",
+        r"\bwhat'?s out there\b.*$",
+        r"\bwhat is out there\b.*$",
+        r"\band how would i style it\b.*$",
+        r"\bhow would i style it\b.*$",
+    ]
+    for pattern in cutoffs:
+        description = re.sub(pattern, " ", description)
+
+    if price_phrase:
+        description = description.replace(price_phrase.group(0), " ")
+    if size_phrase:
+        description = description.replace(size_phrase.group(0), " ")
+
+    filler = [
+        "i'm looking for", "i am looking for", "looking for",
+        "i want", "i need",
+    ]
+    for phrase in filler:
+        description = description.replace(phrase, " ")
+
+    description = re.sub(r"[^a-z0-9\s]", " ", description)
+    description = re.sub(r"\s+", " ", description).strip()
+
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +164,49 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the query into description/size/max_price
+    session["parsed"] = _parse_query(query)
+
+    # Step 3: search listings; branch on whether anything matched
+    results = search_listings(
+        description=session["parsed"]["description"],
+        size=session["parsed"]["size"],
+        max_price=session["parsed"]["max_price"],
+    )
+    session["search_results"] = results
+
+    if not results:
+        size_part = f" in size {session['parsed']['size']}" if session["parsed"]["size"] else ""
+        price_part = (
+            f" under ${session['parsed']['max_price']:.2f}"
+            if session["parsed"]["max_price"] is not None
+            else ""
+        )
+        session["error"] = (
+            f"No listings matched '{session['parsed']['description']}'"
+            f"{price_part}{size_part}. Try raising your max price, removing the "
+            "size filter, or using broader keywords."
+        )
+        return session  # STOP — do not call suggest_outfit or create_fit_card
+
+    # Step 4: select the top-scored result
+    session["selected_item"] = results[0]
+
+    # Step 5: suggest an outfit using the selected item + wardrobe
+    session["outfit_suggestion"] = suggest_outfit(
+        new_item=session["selected_item"],
+        wardrobe=session["wardrobe"],
+    )
+
+    # Step 6: turn the outfit suggestion into a shareable fit card
+    session["fit_card"] = create_fit_card(
+        outfit=session["outfit_suggestion"],
+        new_item=session["selected_item"],
+    )
+
+    # Step 7: return the completed session
     return session
 
 
