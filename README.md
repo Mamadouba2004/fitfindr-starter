@@ -1,3 +1,13 @@
+---
+title: FitFindr
+emoji: 🛍️
+colorFrom: orange
+colorTo: pink
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
 # FitFindr 🛍️
 
 FitFindr is a multi-tool AI agent that helps users find secondhand pieces and figure out how to wear them. Give it one natural-language request and it searches a mock listings dataset, suggests how to style the top match against your wardrobe, and writes a shareable caption for it — deciding what to do next based on what each step actually returns, not by running a fixed pipeline.
